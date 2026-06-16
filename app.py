@@ -6,56 +6,65 @@ from flask import Flask, request, render_template, jsonify
 
 app = Flask(__name__)
 
-# Path to your pickled decision tree regression model
 MODEL_PATH = "decision_regression_pkl.pkl"
 
 def load_model():
     if not os.path.exists(MODEL_PATH):
-        raise FileNotFoundError(f"Model file '{MODEL_PATH}' not found. Ensure it is placed in the root directory.")
+        raise FileNotFoundError(f"Model file '{MODEL_PATH}' not found in the root directory.")
     with open(MODEL_PATH, "rb") as f:
         return pickle.load(f)
 
-# Load the model globally on application startup
-model = load_model()
-
-# Dynamically extract feature inputs expected by the training state
-# Standard features: ['Make', 'Model', 'Year', 'Engine Size', 'Mileage', 'Fuel Type', 'Transmission']
-FEATURES = list(model.feature_names_in_)
+# Global model initialization
+try:
+    model = load_model()
+    # Extract exact features: ['Make', 'Model', 'Year', 'Engine Size', 'Mileage', 'Fuel Type', 'Transmission']
+    FEATURES = list(model.feature_names_in_)
+except Exception as e:
+    print(f"Error initializing model: {e}")
+    FEATURES = ['Make', 'Model', 'Year', 'Engine Size', 'Mileage', 'Fuel Type', 'Transmission']
 
 @app.route("/", methods=["GET"])
 def home():
-    # Renders your frontend UI and passes feature names for building form inputs dynamically
     return render_template("index.html", features=FEATURES)
 
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        # Support both multi-part Form submissions and raw API JSON payloads
+        # Accept both form data and JSON payloads seamlessly
         if request.is_json:
             data = request.get_json()
         else:
             data = request.form.to_dict()
         
-        # Parse inputs into an array maintaining the correct feature column sequence
-        input_data = []
+        # Build dictionary aligning with expected features
+        parsed_data = {}
         for feature in FEATURES:
-            if feature not in data or data[feature] == "":
-                return jsonify({"error": f"Missing expected parameter: {feature}"}), 400
+            if feature not in data or str(data[feature]).strip() == "":
+                return jsonify({"error": f"Missing or empty input for field: {feature}"}), 400
             
-            val = data[feature]
-            # Convert numeric entries while leaving encoded category strings intact
-            try:
-                if "." in str(val):
-                    input_data.append(float(val))
-                else:
-                    input_data.append(int(val))
-            except ValueError:
-                input_data.append(val)
+            raw_val = str(data[feature]).strip()
+            
+            # Strict type handling to prevent Scikit-Learn data type mismatch errors
+            if feature in ["Year", "Mileage"]:
+                try:
+                    parsed_data[feature] = [int(float(raw_val))]
+                except ValueError:
+                    return jsonify({"error": f"Field '{feature}' must be a valid integer numeric value."}), 400
+            elif feature in ["Engine Size"]:
+                try:
+                    parsed_data[feature] = [float(raw_val)]
+                except ValueError:
+                    return jsonify({"error": f"Field '{feature}' must be a valid decimal numeric value."}), 400
+            else:
+                # Keep text categories as strings. 
+                # Note: If your model throws a "could not convert string to float" error here, 
+                # you must pass the exact encoded numeric representation (ID/Integer) used during training.
+                parsed_data[feature] = [raw_val]
+
+        # Convert to DataFrame ensuring column sequence matches model expectations perfectly
+        input_df = pd.DataFrame(parsed_data)[FEATURES]
         
-        # Build DataFrame with proper feature names to satisfy Scikit-Learn requirements
-        input_df = pd.DataFrame([input_data], columns=FEATURES)
-        
-        # Perform decision tree regression prediction
+        # Generate model prediction
         prediction = model.predict(input_df)[0]
         
         return jsonify({
@@ -64,9 +73,14 @@ def predict():
         })
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        # Detailed error printing inside Render logs to debug exact mismatches
+        print(f"Prediction Pipeline Exception: {str(e)}")
+        return jsonify({"error": f"Server Prediction Error: {str(e)}"}), 500
 
 if __name__ == "__main__":
-    # Render routes web traffic via an automatically assigned PORT variable
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
+
+
+        
+    
